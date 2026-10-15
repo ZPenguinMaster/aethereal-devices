@@ -14,6 +14,7 @@
 \*---------------------------------------------------------*/
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
@@ -56,13 +57,21 @@ using namespace std::chrono_literals;
 #define AETHEREAL_SERVICE_HOST          "127.0.0.1"
 #define AETHEREAL_SERVICE_DEFAULT_PORT  6743
 
-static volatile bool            stop_requested      = false;
+static std::atomic<bool>        stop_requested      { false };
 static std::mutex               stop_mutex;
 static std::condition_variable  stop_cv;
 
+/*---------------------------------------------------------*\
+| From a thread: stop now. (A POSIX signal handler only     |
+| sets the flag: nothing else is safe there, and the wait   |
+| sees it within a second.)                                 |
+\*---------------------------------------------------------*/
 static void RequestStop()
 {
-    stop_requested = true;
+    {
+        std::lock_guard<std::mutex> lock(stop_mutex);
+        stop_requested = true;
+    }
     stop_cv.notify_one();
 }
 
@@ -420,7 +429,7 @@ static BOOL WINAPI ConsoleCtrlHandler(DWORD)
 #else
 static void SignalHandler(int)
 {
-    RequestStop();
+    stop_requested = true;
 }
 #endif
 
