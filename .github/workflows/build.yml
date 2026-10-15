@@ -1,0 +1,102 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          cmake --build build --config Release --parallel
+          cmake --install build --config Release --prefix dist
+
+      - name: Check it serves
+        shell: pwsh
+        run: |
+          $p = Start-Process dist\aethereal-devices.exe -ArgumentList "--no-smbus","--port","6750" -PassThru
+          $up = $false
+          for ($i = 0; $i -lt 30 -and -not $up; $i++) {
+            try { (New-Object Net.Sockets.TcpClient("127.0.0.1", 6750)).Close(); $up = $true } catch { Start-Sleep 1 }
+          }
+          Stop-Process $p -Force
+          if (-not $up) { Write-Error "the SDK server didn't come up"; exit 1 }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item LICENSE, AETHEREAL.md dist\
+          Compress-Archive -Path dist\* -DestinationPath aethereal-devices-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aethereal-devices-windows-x64
+          path: aethereal-devices-windows-x64.zip
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libusb-1.0-0-dev libhidapi-dev pkg-config
+          # OpenRGB needs mbedtls 3; Ubuntu 24.04 has 2.28
+          git clone --depth 1 -b v3.5.2 https://github.com/Mbed-TLS/mbedtls.git /tmp/mbedtls
+          cmake -S /tmp/mbedtls -B /tmp/mbedtls/build -DENABLE_PROGRAMS=OFF -DENABLE_TESTING=OFF -DCMAKE_INSTALL_PREFIX=/opt/mbedtls3 -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          cmake --build /tmp/mbedtls/build --parallel
+          sudo cmake --install /tmp/mbedtls/build
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DMBEDTLS_ROOT=/opt/mbedtls3
+          cmake --build build --parallel
+
+      - name: Check it serves
+        run: |
+          ./build/aethereal-devices --version
+          ./build/aethereal-devices --no-smbus --port 6750 &
+          for i in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/6750) 2>/dev/null && break; sleep 1; done
+          (echo > /dev/tcp/127.0.0.1/6750) || { echo "the SDK server didn't come up"; exit 1; }
+          kill %1; wait %1 || true
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: aethereal-devices-windows-x64
+
+      # The GPL: the exact source of every release, beside it
+      - name: Source
+        run: git archive --format=zip --prefix="aethereal-devices-${GITHUB_REF_NAME}/" -o "aethereal-devices-${GITHUB_REF_NAME}-source.zip" HEAD
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            aethereal-devices-windows-x64.zip \
+            "aethereal-devices-${GITHUB_REF_NAME}-source.zip" \
+            --title "Aethereal Device Service ${GITHUB_REF_NAME}" \
+            --notes "A modified OpenRGB 1.0, built from ${GITHUB_SHA}. The source of this exact build is attached and at this tag. GPL-2.0-or-later. Not code signed yet."

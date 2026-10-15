@@ -736,6 +736,12 @@ void DetectionManager::BackgroundDetectDevices()
     unsigned int        initial_detection_delay_ms  = JsonUtils::JsonGetInt(detector_settings, "initial_detection_delay_ms");
 
     /*-----------------------------------------------------*\
+    | Check SMBus disabled setting (no I2C/SMBus interfaces |
+    | or devices are touched: RAM and some motherboards)    |
+    \*-----------------------------------------------------*/
+    bool                smbus_disabled              = JsonUtils::JsonGetBool(detector_settings, "smbus_disabled");
+
+    /*-----------------------------------------------------*\
     | If configured, delay detection for the configured     |
     | time only on first detection                          |
     \*-----------------------------------------------------*/
@@ -804,25 +810,28 @@ void DetectionManager::BackgroundDetectDevices()
                                         + detection_percent_other_count
                                         + detection_percent_hid_count;
 
-    /*-----------------------------------------------------*\
-    | Detect I2C interfaces                                 |
-    \*-----------------------------------------------------*/
-    BackgroundDetectI2CBuses();
+    if(!smbus_disabled)
+    {
+        /*-------------------------------------------------*\
+        | Detect I2C interfaces                             |
+        \*-------------------------------------------------*/
+        BackgroundDetectI2CBuses();
 
-    /*-----------------------------------------------------*\
-    | Detect I2C devices                                    |
-    \*-----------------------------------------------------*/
-    BackgroundDetectI2CDevices(detector_settings);
+        /*-------------------------------------------------*\
+        | Detect I2C devices                                |
+        \*-------------------------------------------------*/
+        BackgroundDetectI2CDevices(detector_settings);
 
-    /*-----------------------------------------------------*\
-    | Detect I2C DRAM devices                               |
-    \*-----------------------------------------------------*/
-    BackgroundDetectI2CDRAMDevices(detector_settings);
+        /*-------------------------------------------------*\
+        | Detect I2C DRAM devices                           |
+        \*-------------------------------------------------*/
+        BackgroundDetectI2CDRAMDevices(detector_settings);
 
-    /*-----------------------------------------------------*\
-    | Detect I2C PCI devices                                |
-    \*-----------------------------------------------------*/
-    BackgroundDetectI2CPCIDevices(detector_settings);
+        /*-------------------------------------------------*\
+        | Detect I2C PCI devices                            |
+        \*-------------------------------------------------*/
+        BackgroundDetectI2CPCIDevices(detector_settings);
+    }
 
     /*-----------------------------------------------------*\
     | Detect HID devices                                    |
