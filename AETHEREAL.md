@@ -36,6 +36,10 @@ OpenRGB come in with a plain merge.
   back to OpenRGB.
 - **2026-10-15:** OpenRGB's GitHub greeting workflows (for its mirror) removed, and a build of our own added
   (`.github/workflows/build.yml`).
+- **2026-10-16:** `aethereal/service_main.cpp`: only one runs per PC. Two would drive the same devices and fight over
+  them, and Windows lets both listen on one port. A second one stops before it looks for any device, with exit
+  code 3. The lock is the `Global\AetherealDevices` mutex on Windows (shared by the service and a copy the app starts),
+  and a `flock` on `$XDG_RUNTIME_DIR/aethereal-devices.lock` elsewhere.
 
 ## Building
 
@@ -62,6 +66,8 @@ cmake --build build
 ```
 aethereal-devices [--port 6743] [--config DIR] [--no-smbus] [--parent PID] [-v]
 ```
+
+If one is already running on the PC (as the service, or started by the app), a new one stops at once with exit code 3.
 
 As a Windows service (from an administrator prompt; the Aethereal installer does this):
 

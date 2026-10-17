@@ -37,6 +37,9 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <sys/types.h>
 #include <unistd.h>
 #ifdef __linux__
@@ -56,6 +59,11 @@ using namespace std::chrono_literals;
 #define AETHEREAL_SERVICE_ID            "AetherealDevices"
 #define AETHEREAL_SERVICE_HOST          "127.0.0.1"
 #define AETHEREAL_SERVICE_DEFAULT_PORT  6743
+
+/*---------------------------------------------------------*\
+| Exit code when another one is already running             |
+\*---------------------------------------------------------*/
+#define AETHEREAL_EXIT_ALREADY_RUNNING  3
 
 static std::atomic<bool>        stop_requested      { false };
 static std::mutex               stop_mutex;
@@ -210,6 +218,57 @@ static void PointConfigAt(const filesystem::path& dir)
     _wputenv_s(L"APPDATA", dir.wstring().c_str());
 #else
     setenv("XDG_CONFIG_HOME", dir.string().c_str(), 1);
+#endif
+}
+
+/*---------------------------------------------------------*\
+| TakeOnlyOneLock                                           |
+|                                                           |
+|   One of us per PC. Two would both drive the same devices |
+|   and fight over them, and Windows lets both listen on    |
+|   the same port, so the app can't tell which it reached.  |
+|   A second one stops before it looks for any device.      |
+|   Returns false if another is running. The lock lasts as  |
+|   long as this process (Windows and the OS free it when   |
+|   it ends, however it ends).                              |
+\*---------------------------------------------------------*/
+static bool TakeOnlyOneLock()
+{
+#ifdef _WIN32
+    /*-----------------------------------------------------*\
+    | Global\: one for the whole PC, so the Windows service |
+    | and a copy the app starts keep each other out. The    |
+    | service's (made as SYSTEM) can't be opened by a       |
+    | person's copy: access denied means it's running.      |
+    \*-----------------------------------------------------*/
+    HANDLE lock = CreateMutexA(NULL, FALSE, "Global\\" AETHEREAL_SERVICE_ID);
+
+    if(lock == NULL)
+    {
+        return(GetLastError() != ERROR_ACCESS_DENIED);
+    }
+    if(GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        CloseHandle(lock);
+        return(false);
+    }
+    return(true);
+#else
+    const char* runtime_dir = getenv("XDG_RUNTIME_DIR");
+    std::string path        = std::string(runtime_dir != NULL ? runtime_dir : "/tmp") + "/aethereal-devices.lock";
+    int         fd          = open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+
+    if(fd < 0)
+    {
+        return(true);   // (can't tell, so don't stand in the way)
+    }
+    if(flock(fd, LOCK_EX | LOCK_NB) != 0)
+    {
+        bool taken = (errno == EWOULDBLOCK);
+        close(fd);
+        return(!taken);
+    }
+    return(true);       // (fd stays open: the lock goes with the process)
 #endif
 }
 
@@ -462,10 +521,22 @@ static int RunService(int argc, char* argv[])
              (unsigned int)options.port, options.config_dir.generic_u8string().c_str());
 
     /*-----------------------------------------------------*\
+    | One per PC. (The ResourceManager, made here, opens    |
+    | the log file for the line below; it touches no device |
+    | until Initialize.)                                    |
+    \*-----------------------------------------------------*/
+    SettingsManager* settings   = ResourceManager::get()->GetSettingsManager();
+
+    if(!TakeOnlyOneLock())
+    {
+        LOG_WARNING("[Aethereal] Another %s is already running on this PC; stopping", AETHEREAL_SERVICE_NAME);
+        return AETHEREAL_EXIT_ALREADY_RUNNING;
+    }
+
+    /*-----------------------------------------------------*\
     | Settings: the SMBus (RAM, older motherboards) on or   |
     | off, from the command line each time                  |
     \*-----------------------------------------------------*/
-    SettingsManager* settings   = ResourceManager::get()->GetSettingsManager();
     json detector_settings      = settings->GetSettings("Detectors");
     detector_settings["smbus_disabled"] = options.no_smbus;
     settings->SetSettings("Detectors", detector_settings);
@@ -572,7 +643,13 @@ static void WINAPI ServiceMain(DWORD, LPTSTR*)
     | The options are the ones in the service's command     |
     | line (set by the installer), not the start arguments  |
     \*-----------------------------------------------------*/
-    if(RunService(main_argc, main_argv) != EXIT_SUCCESS)
+    int exitval = RunService(main_argc, main_argv);
+
+    if(exitval == AETHEREAL_EXIT_ALREADY_RUNNING)
+    {
+        LogEvent("Another " AETHEREAL_SERVICE_NAME " is already running on this PC, so this one stopped");
+    }
+    else if(exitval != EXIT_SUCCESS)
     {
         LogEvent(AETHEREAL_SERVICE_NAME " stopped with an error; see its log");
     }
